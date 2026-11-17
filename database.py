@@ -8,11 +8,30 @@ CREDENTIALS_FILE = "credentials.txt"
 UPLOAD_DIR = "uploads"
 TEMPLATE_CONTRACT_PATH = os.path.join(UPLOAD_DIR, "Шаблон_договора_аренды_ТЦ.txt")
 
+# Тарифы ТЦ для автоматического расчета переменной части аренды (коммуналки)
+HVS_TARIFF = 48.0      # Холодная вода (ХВС), ₽ за 1 м³
+GVS_TARIFF = 195.0     # Горячая вода (ГВС), ₽ за 1 м³
+ELEC_TARIFF = 6.5      # Электроэнергия, ₽ за 1 кВт·ч
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+def current_month_str() -> str:
+    return datetime.now().strftime("%m.%Y")
+
+
+def is_due_date_passed(due_date_str: str) -> bool:
+    """Проверяет, истек ли срок оплаты (формат ДД.ММ.ГГГГ)"""
+    if not due_date_str or not due_date_str.strip():
+        return False
+    try:
+        due_dt = datetime.strptime(due_date_str.strip(), "%d.%m.%Y").date()
+        return datetime.now().date() > due_dt
+    except ValueError:
+        return False
+
+
 def ensure_contract_template():
-    """Создает файл типового шаблона договора аренды, если его еще нет"""
     if os.path.exists(TEMPLATE_CONTRACT_PATH):
         return
     template_text = """ТИПОВОЙ ДОГОВОР АРЕНДЫ НЕЖИЛОГО ПОМЕЩЕНИЯ № ___/2026
@@ -26,21 +45,15 @@ _____________________________________________ (Арендатор) с друго
 1. ПРЕДМЕТ ДОГОВОРА
 1.1. Арендодатель обязуется предоставить Арендатору за плату во временное владение
 и пользование торговое помещение (павильон) в здании Торгового Центра.
-1.2. Назначение помещения: розничная торговля / оказание услуг.
 
 2. АРЕНДНАЯ ПЛАТА И ПОРЯДОК РАСЧЕТОВ
 2.1. Постоянная часть арендной платы вносится ежемесячно не позднее 5-го числа
 текущего месяца путем перечисления денежных средств на расчетный счет Арендодателя.
-2.2. Переменная часть (электроэнергия, водоснабжение) оплачивается по показаниям
+2.2. Переменная часть (ХВС, ГВС, электроэнергия) оплачивается по показаниям
 индивидуальных приборов учета.
 
 3. ЭКСПЛУАТАЦИЯ И РЕМОНТ
-3.1. Арендатор обязуется соблюдать правила пожарной безопасности и регламент ТЦ.
-3.2. Заявки на устранение технических неисправностей подаются через систему MallService.
-
-4. РЕКВИЗИТЫ И ПОДПИСИ СТОРОН
-Арендодатель: ООО «УК ТЦ»                 Арендатор: _______________________
-М.П.                                       М.П.
+3.1. Заявки на устранение технических неисправностей подаются через систему MallService.
 """
     with open(TEMPLATE_CONTRACT_PATH, "w", encoding="utf-8") as f:
         f.write(template_text)
@@ -79,11 +92,14 @@ def init_db():
                 contract_number TEXT DEFAULT '',
                 contract_end_date TEXT DEFAULT '',
                 contract_file_name TEXT DEFAULT '',
-                contract_file_path TEXT DEFAULT ''
+                contract_file_path TEXT DEFAULT '',
+                payment_status TEXT DEFAULT 'paid',
+                prev_hvs REAL DEFAULT 0,
+                prev_gvs REAL DEFAULT 0,
+                prev_elec REAL DEFAULT 0
             )
         """)
 
-        # Мягкая миграция таблицы spaces
         space_cols = {row["name"] for row in conn.execute("PRAGMA table_info(spaces)").fetchall()}
         migrations = {
             "point_director": "TEXT DEFAULT ''",
@@ -93,10 +109,59 @@ def init_db():
             "contract_end_date": "TEXT DEFAULT ''",
             "contract_file_name": "TEXT DEFAULT ''",
             "contract_file_path": "TEXT DEFAULT ''",
+            "payment_status": "TEXT DEFAULT 'paid'",
+            "prev_hvs": "REAL DEFAULT 0",
+            "prev_gvs": "REAL DEFAULT 0",
+            "prev_elec": "REAL DEFAULT 0",
         }
         for col, col_type in migrations.items():
             if col not in space_cols:
                 conn.execute(f"ALTER TABLE spaces ADD COLUMN {col} {col_type}")
+
+        if "prev_water" in space_cols:
+            conn.execute("UPDATE spaces SET prev_hvs = prev_water WHERE prev_hvs = 0 AND prev_water > 0")
+
+        conn.execute("UPDATE spaces SET payment_status = 'unpaid' WHERE payment_status = 'pending'")
+
+        # Помесячная история платежей и фиксации просрочек
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rent_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                period TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                is_paid INTEGER NOT NULL DEFAULT 0,
+                was_overdue INTEGER NOT NULL DEFAULT 0,
+                paid_date TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                UNIQUE(space_id, period)
+            )
+        """)
+
+        # Формы-заявки на оплату (Счет/Акт УК -> Платежка Арендатора -> Закрытие УК)
+        # Статусы: 'awaiting_payment' | 'under_review' | 'closed'
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS payment_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                period TEXT NOT NULL,
+                title TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                due_date TEXT NOT NULL,
+                bill_file_name TEXT DEFAULT '',
+                bill_file_path TEXT DEFAULT '',
+                receipt_file_name TEXT DEFAULT '',
+                receipt_file_path TEXT DEFAULT '',
+                tenant_comment TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'awaiting_payment',
+                was_overdue INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                paid_uploaded_at TEXT DEFAULT '',
+                closed_at TEXT DEFAULT ''
+            )
+        """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tickets (
@@ -139,6 +204,49 @@ def init_db():
         """)
 
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS meter_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                period TEXT NOT NULL,
+                prev_hvs REAL NOT NULL DEFAULT 0,
+                curr_hvs REAL NOT NULL DEFAULT 0,
+                prev_gvs REAL NOT NULL DEFAULT 0,
+                curr_gvs REAL NOT NULL DEFAULT 0,
+                prev_elec REAL NOT NULL DEFAULT 0,
+                curr_elec REAL NOT NULL DEFAULT 0,
+                total_cost INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'submitted',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        mr_cols = {row["name"] for row in conn.execute("PRAGMA table_info(meter_readings)").fetchall()}
+        if "prev_hvs" not in mr_cols:
+            conn.execute("ALTER TABLE meter_readings ADD COLUMN prev_hvs REAL NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE meter_readings ADD COLUMN curr_hvs REAL NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE meter_readings ADD COLUMN prev_gvs REAL NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE meter_readings ADD COLUMN curr_gvs REAL NOT NULL DEFAULT 0")
+            if "prev_water" in mr_cols:
+                conn.execute("UPDATE meter_readings SET prev_hvs = prev_water, curr_hvs = curr_water")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS financial_docs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                doc_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
                 password_hash TEXT NOT NULL,
@@ -170,51 +278,84 @@ def init_db():
         if conn.execute("SELECT COUNT(*) FROM spaces").fetchone()[0] == 0:
             initial_spaces = []
             sample_data = {
-                "1_top_1": ("1-01", "Кофейня «Бодрость»", 42.0, 145000, "occupied", "Иванова Мария, +7 (904) 111-22-33", "Петров Сергей (куратор сети), +7 (904) 999-88-77", "Мокрая точка (подвод воды и канализации).", "№ 01-А/2026", "31.12.2026"),
-                "1_top_2": ("1-02", "", 55.0, 175000, "free", "", "", "Потенциальный арендатор: табачная лавка, звонили 10.11.", "", ""),
-                "1_top_3": ("1-03", "Аптека «Здоровье»", 60.0, 190000, "occupied", "Смирнова Елена, +7 (922) 333-44-55", "Кузнецов Олег (терр. директор), +7 (922) 777-66-55", "Якорный арендатор, оплата всегда вовремя.", "№ 03-А/2025", "30.06.2027"),
-                "1_bot_1": ("1-04", "", 48.0, 150000, "free", "", "", "", "", ""),
-                "1_bot_2": ("1-05", "Оптика «Взгляд»", 38.0, 125000, "reserved", "Волков Дмитрий, +7 (950) 444-11-22", "", "Ждем подписанный скан договора до пятницы.", "Проект № 05-А/2026", "01.12.2027"),
-                "1_bot_3": ("1-06", "", 75.0, 220000, "free", "", "", "", "", ""),
-                "2_top_1": ("2-01", "Одежда «Стиль»", 85.0, 160000, "occupied", "Морозова Анна, +7 (912) 888-00-11", "Белова Ольга (рег. директор), +7 (912) 888-00-99", "Просили рассмотреть скидку 10% на январь-февраль.", "№ 11-А/2026", "31.10.2026"),
-                "2_top_2": ("2-02", "", 64.0, 120000, "free", "", "", "", "", ""),
-                "2_top_3": ("2-03", "", 64.0, 120000, "free", "", "", "", "", ""),
-                "2_bot_1": ("2-04", "Книги и канцтовары", 50.0, 95000, "occupied", "Новиков Илья (ИП), +7 (963) 222-33-44", "", "", "№ 14-А/2026", "15.08.2027"),
-                "2_bot_2": ("2-05", "", 45.0, 88000, "free", "", "", "", "", ""),
-                "2_bot_3": ("2-06", "Фудкорт / Пекарня", 90.0, 180000, "reserved", "Зайцева Наталья, +7 (908) 555-66-77", "", "Требуется усиленная вытяжка, согласовано с главным инженером.", "Проект № 16-А/2026", "31.12.2027"),
+                "1_top_1": ("1-01", "Кофейня «Бодрость»", 42.0, 145000, "occupied", "Иванова Мария, +7 (904) 111-22-33", "Петров Сергей (куратор сети), +7 (904) 999-88-77", "Мокрая точка (подвод воды и канализации).", "№ 01-А/2026", "31.12.2026", "paid", 84.5, 40.0, 3420.0),
+                "1_top_2": ("1-02", "", 55.0, 175000, "free", "", "", "Потенциальный арендатор: табачная лавка, звонили 10.11.", "", "", "paid", 0.0, 0.0, 0.0),
+                "1_top_3": ("1-03", "Аптека «Здоровье»", 60.0, 190000, "occupied", "Смирнова Елена, +7 (922) 333-44-55", "Кузнецов Олег (терр. директор), +7 (922) 777-66-55", "Якорный арендатор, оплата всегда вовремя.", "№ 03-А/2025", "30.06.2027", "paid", 32.0, 16.0, 2150.0),
+                "1_bot_1": ("1-04", "", 48.0, 150000, "free", "", "", "", "", "", "paid", 0.0, 0.0, 0.0),
+                "1_bot_2": ("1-05", "Оптика «Взгляд»", 38.0, 125000, "reserved", "Волков Дмитрий, +7 (950) 444-11-22", "", "Ждем подписанный скан договора до пятницы.", "Проект № 05-А/2026", "01.12.2027", "unpaid", 8.0, 4.0, 610.0),
+                "1_bot_3": ("1-06", "", 75.0, 220000, "free", "", "", "", "", "", "paid", 0.0, 0.0, 0.0),
+                "2_top_1": ("2-01", "Одежда «Стиль»", 85.0, 160000, "occupied", "Морозова Анна, +7 (912) 888-00-11", "Белова Ольга (рег. директор), +7 (912) 888-00-99", "Просили рассмотреть скидку 10% на январь-февраль.", "№ 11-А/2026", "31.10.2026", "unpaid", 12.0, 7.0, 1890.0),
+                "2_top_2": ("2-02", "", 64.0, 120000, "free", "", "", "", "", "", "paid", 0.0, 0.0, 0.0),
+                "2_top_3": ("2-03", "", 64.0, 120000, "free", "", "", "", "", "", "paid", 0.0, 0.0, 0.0),
+                "2_bot_1": ("2-04", "Книги и канцтовары", 50.0, 95000, "occupied", "Новиков Илья (ИП), +7 (963) 222-33-44", "", "", "№ 14-А/2026", "15.08.2027", "unpaid", 10.0, 5.0, 940.0),
+                "2_bot_2": ("2-05", "", 45.0, 88000, "free", "", "", "", "", "", "paid", 0.0, 0.0, 0.0),
+                "2_bot_3": ("2-06", "Фудкорт / Пекарня", 90.0, 180000, "reserved", "Зайцева Наталья, +7 (908) 555-66-77", "", "Требуется усиленная вытяжка, согласовано с главным инженером.", "Проект № 16-А/2026", "31.12.2027", "unpaid", 52.0, 28.0, 4100.0),
             }
 
             x_positions = [30, 215, 400]
             for floor in (1, 2):
                 for idx, x in enumerate(x_positions, start=1):
                     top_id = f"{floor}_top_{idx}"
-                    code, tenant, area, price, status, p_dir, a_dir, notes, c_num, c_end = sample_data[top_id]
-                    initial_spaces.append((top_id, floor, code, tenant, area, price, status, x, 20, 170, 110, p_dir, a_dir, notes, c_num, c_end, "", ""))
+                    code, tenant, area, price, status, p_dir, a_dir, notes, c_num, c_end, pay_st, ph, pg, pe = sample_data[top_id]
+                    initial_spaces.append((top_id, floor, code, tenant, area, price, status, x, 20, 170, 110, p_dir, a_dir, notes, c_num, c_end, "", "", pay_st, ph, pg, pe))
 
                     bot_id = f"{floor}_bot_{idx}"
-                    code, tenant, area, price, status, p_dir, a_dir, notes, c_num, c_end = sample_data[bot_id]
-                    initial_spaces.append((bot_id, floor, code, tenant, area, price, status, x, 230, 170, 110, p_dir, a_dir, notes, c_num, c_end, "", ""))
+                    code, tenant, area, price, status, p_dir, a_dir, notes, c_num, c_end, pay_st, ph, pg, pe = sample_data[bot_id]
+                    initial_spaces.append((bot_id, floor, code, tenant, area, price, status, x, 230, 170, 110, p_dir, a_dir, notes, c_num, c_end, "", "", pay_st, ph, pg, pe))
 
             conn.executemany(
-                "INSERT INTO spaces VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO spaces VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 initial_spaces,
             )
-        else:
-            # Дозаполним демо-номера договоров в существующей БД, если они пустые
-            demo_contracts = {
-                "1_top_1": ("№ 01-А/2026", "31.12.2026"),
-                "1_top_3": ("№ 03-А/2025", "30.06.2027"),
-                "1_bot_2": ("Проект № 05-А/2026", "01.12.2027"),
-                "2_top_1": ("№ 11-А/2026", "31.10.2026"),
-                "2_bot_1": ("№ 14-А/2026", "15.08.2027"),
-                "2_bot_3": ("Проект № 16-А/2026", "31.12.2027"),
-            }
-            for sid, (c_num, c_end) in demo_contracts.items():
-                conn.execute(
-                    """UPDATE spaces SET contract_number = ?, contract_end_date = ?
-                       WHERE id = ? AND COALESCE(contract_number, '') = ''""",
-                    (c_num, c_end, sid),
-                )
+
+        if conn.execute("SELECT COUNT(*) FROM rent_payments").fetchone()[0] == 0:
+            demo_history = [
+                ("1_top_1", "08.2026", 145000, 1, 0, "03.08.2026", ""),
+                ("1_top_1", "09.2026", 145000, 1, 0, "04.09.2026", ""),
+                ("1_top_1", "10.2026", 145000, 1, 0, "02.10.2026", ""),
+                ("1_top_1", "11.2026", 145000, 1, 0, "05.11.2026", ""),
+                ("1_top_3", "08.2026", 190000, 1, 0, "04.08.2026", ""),
+                ("1_top_3", "09.2026", 190000, 1, 1, "14.09.2026", "Задержка банковского перевода на 9 дней"),
+                ("1_top_3", "10.2026", 190000, 1, 0, "03.10.2026", ""),
+                ("1_top_3", "11.2026", 190000, 1, 0, "04.11.2026", ""),
+                ("1_bot_2", "10.2026", 125000, 1, 0, "05.10.2026", ""),
+                ("1_bot_2", "11.2026", 125000, 0, 0, "", "Ожидается платеж по договору"),
+                ("2_top_1", "08.2026", 160000, 1, 0, "05.08.2026", ""),
+                ("2_top_1", "09.2026", 160000, 1, 1, "18.09.2026", "Оплата поступила с просрочкой 13 дней"),
+                ("2_top_1", "10.2026", 160000, 1, 1, "12.10.2026", "Оплата поступила с просрочкой 7 дней"),
+                ("2_top_1", "11.2026", 160000, 0, 1, "", "Просрочка оплаты за текущий месяц"),
+                ("2_bot_1", "09.2026", 95000, 1, 0, "04.09.2026", ""),
+                ("2_bot_1", "10.2026", 95000, 1, 0, "05.10.2026", ""),
+                ("2_bot_1", "11.2026", 95000, 0, 0, "", ""),
+                ("2_bot_3", "11.2026", 180000, 0, 0, "", ""),
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO rent_payments (space_id, period, amount, is_paid, was_overdue, paid_date, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                demo_history,
+            )
+
+        # Демонстрационные формы на оплату (для наглядности сразу после запуска)
+        if conn.execute("SELECT COUNT(*) FROM payment_requests").fetchone()[0] == 0:
+            demo_bills = [
+                (
+                    "2_top_1", "2-01", "Одежда «Стиль»", "11.2026",
+                    "Счет-акт за аренду и коммуналку (Ноябрь 2026)", 168450, "10.11.2026",
+                    "", "", "", "", "", "awaiting_payment", 0, "01.11.2026 10:00", "", ""
+                ),
+                (
+                    "2_bot_1", "2-04", "Книги и канцтовары", "11.2026",
+                    "Счет-акт № 114 за аренду (Ноябрь 2026)", 95000, "25.11.2026",
+                    "", "", "", "", "", "awaiting_payment", 0, "02.11.2026 11:30", "", ""
+                ),
+            ]
+            conn.executemany(
+                """INSERT INTO payment_requests
+                   (space_id, space_code, tenant_name, period, title, amount, due_date,
+                    bill_file_name, bill_file_path, receipt_file_name, receipt_file_path,
+                    tenant_comment, status, was_overdue, created_at, paid_uploaded_at, closed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                demo_bills,
+            )
 
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             default_users = [
@@ -289,11 +430,13 @@ def update_space(
     point_director: str,
     area_director: str,
     internal_notes: str,
+    payment_status: str = "paid",
 ):
     with get_connection() as conn:
         conn.execute(
             """UPDATE spaces
-               SET status = ?, tenant = ?, price = ?, point_director = ?, area_director = ?, internal_notes = ?
+               SET status = ?, tenant = ?, price = ?, point_director = ?, area_director = ?,
+                   internal_notes = ?, payment_status = ?
                WHERE id = ?""",
             (
                 status,
@@ -302,9 +445,232 @@ def update_space(
                 point_director.strip(),
                 area_director.strip(),
                 internal_notes.strip(),
+                payment_status,
                 space_id,
             ),
         )
+    sync_current_month_payment(space_id, payment_status == "paid")
+
+
+def sync_current_month_payment(space_id: str, is_paid: bool, was_overdue: bool | None = None):
+    space = get_space_by_id(space_id)
+    if not space:
+        return
+    period = current_month_str()
+    today_str = datetime.now().strftime("%d.%m.%Y") if is_paid else ""
+    new_status = "paid" if is_paid else "unpaid"
+
+    with get_connection() as conn:
+        conn.execute("UPDATE spaces SET payment_status = ? WHERE id = ?", (new_status, space_id))
+        existing = conn.execute(
+            "SELECT * FROM rent_payments WHERE space_id = ? AND period = ?",
+            (space_id, period),
+        ).fetchone()
+
+        if existing:
+            overdue_flag = int(was_overdue) if was_overdue is not None else existing["was_overdue"]
+            paid_dt = (existing["paid_date"] or today_str) if is_paid else ""
+            conn.execute(
+                """UPDATE rent_payments
+                   SET is_paid = ?, was_overdue = ?, paid_date = ?, amount = ?
+                   WHERE id = ?""",
+                (1 if is_paid else 0, overdue_flag, paid_dt, space["price"], existing["id"]),
+            )
+        else:
+            overdue_flag = int(was_overdue) if was_overdue is not None else 0
+            conn.execute(
+                """INSERT INTO rent_payments (space_id, period, amount, is_paid, was_overdue, paid_date, note)
+                   VALUES (?, ?, ?, ?, ?, ?, '')""",
+                (space_id, period, space["price"], 1 if is_paid else 0, overdue_flag, today_str),
+            )
+
+
+def get_rent_payments(space_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM rent_payments WHERE space_id = ? ORDER BY substr(period, 4, 4) DESC, substr(period, 1, 2) DESC, id DESC",
+            (space_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def save_rent_payment_record(
+    space_id: str,
+    period: str,
+    amount: int,
+    is_paid: bool,
+    was_overdue: bool,
+    paid_date: str = "",
+    note: str = "",
+):
+    period_clean = period.strip() or current_month_str()
+    p_date = paid_date.strip() if is_paid else ""
+    if is_paid and not p_date:
+        p_date = datetime.now().strftime("%d.%m.%Y")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO rent_payments (space_id, period, amount, is_paid, was_overdue, paid_date, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(space_id, period) DO UPDATE SET
+                 amount = excluded.amount,
+                 is_paid = excluded.is_paid,
+                 was_overdue = excluded.was_overdue,
+                 paid_date = excluded.paid_date,
+                 note = excluded.note""",
+            (space_id, period_clean, amount, 1 if is_paid else 0, 1 if was_overdue else 0, p_date, note.strip()),
+        )
+        if period_clean == current_month_str():
+            conn.execute(
+                "UPDATE spaces SET payment_status = ? WHERE id = ?",
+                ("paid" if is_paid else "unpaid", space_id),
+            )
+
+
+def get_overdue_space_ids() -> set[str]:
+    """Возвращает ID павильонов с активной просрочкой в истории или в открытых формах на оплату"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT space_id FROM rent_payments WHERE is_paid = 0 AND was_overdue = 1"
+        ).fetchall()
+        overdue = {r["space_id"] for r in rows}
+
+        open_reqs = conn.execute(
+            "SELECT space_id, due_date FROM payment_requests WHERE status != 'closed'"
+        ).fetchall()
+        for req in open_reqs:
+            if is_due_date_passed(req["due_date"]):
+                overdue.add(req["space_id"])
+        return overdue
+
+
+def get_payment_history_stats(space_id: str) -> tuple[int, int]:
+    with get_connection() as conn:
+        unpaid_ov = conn.execute(
+            "SELECT COUNT(*) FROM rent_payments WHERE space_id = ? AND is_paid = 0 AND was_overdue = 1",
+            (space_id,),
+        ).fetchone()[0]
+        paid_ov = conn.execute(
+            "SELECT COUNT(*) FROM rent_payments WHERE space_id = ? AND is_paid = 1 AND was_overdue = 1",
+            (space_id,),
+        ).fetchone()[0]
+        return unpaid_ov, paid_ov
+
+
+# --- ФОРМЫ НА ОПЛАТУ (СЧЕТ/АКТ -> ПЛАТЕЖКА -> ЗАКРЫТИЕ) ---
+
+def create_payment_request(
+    space_id: str,
+    period: str,
+    title: str,
+    amount: int,
+    due_date: str,
+    bill_file_name: str = "",
+    bill_file_path: str = "",
+):
+    space = get_space_by_id(space_id)
+    if not space:
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    period_val = period.strip() or current_month_str()
+    title_val = title.strip() or f"Акт/счет на оплату за {period_val}"
+    due_val = due_date.strip() or datetime.now().strftime("%d.%m.%Y")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO payment_requests
+               (space_id, space_code, tenant_name, period, title, amount, due_date,
+                bill_file_name, bill_file_path, status, was_overdue, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', 0, ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                period_val,
+                title_val,
+                int(amount or space["price"]),
+                due_val,
+                bill_file_name,
+                bill_file_path,
+                now,
+            ),
+        )
+    # Если выставлен новый акт на текущий месяц, статус месяца переходит в "Не оплачено"
+    if period_val == current_month_str():
+        sync_current_month_payment(space_id, False)
+
+
+def attach_payment_receipt(
+    request_id: int,
+    receipt_file_name: str,
+    receipt_file_path: str,
+    tenant_comment: str = "",
+):
+    if not receipt_file_name:
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE payment_requests
+               SET receipt_file_name = ?, receipt_file_path = ?, tenant_comment = ?,
+                   status = 'under_review', paid_uploaded_at = ?
+               WHERE id = ?""",
+            (receipt_file_name, receipt_file_path, tenant_comment.strip(), now, request_id),
+        )
+
+
+def return_payment_request_to_tenant(request_id: int):
+    """УК возвращает форму арендатору на доработку (если платежка неверная)"""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET status = 'awaiting_payment' WHERE id = ?",
+            (request_id,),
+        )
+
+
+def close_payment_request(request_id: int, force_overdue: bool | None = None):
+    """УК проверяет платежку и закрывает форму как оплаченную с фиксацией возможной просрочки"""
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,)).fetchone()
+        if not row:
+            return
+        req = dict(row)
+        overdue = force_overdue if force_overdue is not None else is_due_date_passed(req["due_date"])
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+        conn.execute(
+            """UPDATE payment_requests
+               SET status = 'closed', was_overdue = ?, closed_at = ?
+               WHERE id = ?""",
+            (1 if overdue else 0, now, request_id),
+        )
+
+    note_text = f"Закрыто по форме №{request_id}" + (" (оплата после срока)" if overdue else "")
+    save_rent_payment_record(
+        space_id=req["space_id"],
+        period=req["period"],
+        amount=req["amount"],
+        is_paid=True,
+        was_overdue=overdue,
+        note=note_text,
+    )
+
+
+def get_payment_requests(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                """SELECT * FROM payment_requests
+                   WHERE space_id = ?
+                   ORDER BY CASE status WHEN 'awaiting_payment' THEN 1 WHEN 'under_review' THEN 2 ELSE 3 END, id DESC""",
+                (space_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM payment_requests
+                   ORDER BY CASE status WHEN 'under_review' THEN 1 WHEN 'awaiting_payment' THEN 2 ELSE 3 END, id DESC"""
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def update_space_contract(
@@ -405,6 +771,122 @@ def get_active_ticket_alerts() -> dict[str, str]:
         return alerts
 
 
+# --- ПОКАЗАНИЯ СЧЕТЧИКОВ (ХВС, ГВС, ЭЛЕКТРОЭНЕРГИЯ) ---
+
+def submit_meter_reading(
+    space_id: str,
+    period: str,
+    curr_hvs: float,
+    curr_gvs: float,
+    curr_elec: float,
+) -> tuple[bool, str]:
+    space = get_space_by_id(space_id)
+    if not space:
+        return False, "Помещение не найдено"
+
+    prev_h = float(space.get("prev_hvs") or 0)
+    prev_g = float(space.get("prev_gvs") or 0)
+    prev_e = float(space.get("prev_elec") or 0)
+
+    if curr_hvs < prev_h or curr_gvs < prev_g or curr_elec < prev_e:
+        return False, "Текущие показания не могут быть меньше предыдущих"
+
+    diff_h = curr_hvs - prev_h
+    diff_g = curr_gvs - prev_g
+    diff_e = curr_elec - prev_e
+    total_cost = round(diff_h * HVS_TARIFF + diff_g * GVS_TARIFF + diff_e * ELEC_TARIFF)
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO meter_readings
+               (space_id, space_code, tenant_name, period, prev_hvs, curr_hvs, prev_gvs, curr_gvs, prev_elec, curr_elec, total_cost, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                period.strip() or "Текущий месяц",
+                prev_h,
+                curr_hvs,
+                prev_g,
+                curr_gvs,
+                prev_e,
+                curr_elec,
+                total_cost,
+                now,
+            ),
+        )
+    return True, f"Показания переданы! Переменная часть аренды: {total_cost:,} ₽".replace(",", " ")
+
+
+def get_meter_readings(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                "SELECT * FROM meter_readings WHERE space_id = ? ORDER BY id DESC", (space_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM meter_readings ORDER BY id DESC").fetchall()
+        return [dict(row) for row in rows]
+
+
+def accept_meter_reading(reading_id: int):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM meter_readings WHERE id = ?", (reading_id,)).fetchone()
+        if not row:
+            return
+        conn.execute("UPDATE meter_readings SET status = 'accepted' WHERE id = ?", (reading_id,))
+        conn.execute(
+            "UPDATE spaces SET prev_hvs = ?, prev_gvs = ?, prev_elec = ? WHERE id = ?",
+            (row["curr_hvs"], row["curr_gvs"], row["curr_elec"], row["space_id"]),
+        )
+
+
+# --- ЗАКРЫВАЮЩИЕ ДОКУМЕНТЫ И ПЛАТЕЖКИ ---
+
+def add_financial_doc(
+    space_id: str,
+    doc_type: str,
+    title: str,
+    file_name: str,
+    file_path: str,
+    uploaded_by: str,
+):
+    space = get_space_by_id(space_id)
+    if not space or not file_name:
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO financial_docs
+               (space_id, space_code, tenant_name, doc_type, title, file_name, file_path, uploaded_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                doc_type,
+                title.strip() or file_name,
+                file_name,
+                file_path,
+                uploaded_by,
+                now,
+            ),
+        )
+
+
+def get_financial_docs(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                "SELECT * FROM financial_docs WHERE space_id = ? ORDER BY id DESC", (space_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM financial_docs ORDER BY id DESC").fetchall()
+        return [dict(row) for row in rows]
+
+
 # --- СООБЩЕНИЯ И РАССЫЛКИ ---
 
 def send_message(
@@ -460,12 +942,29 @@ def get_sync_signature() -> tuple:
         spaces_sig = conn.execute(
             """SELECT COALESCE(GROUP_CONCAT(
                 id || ':' || status || ':' || COALESCE(tenant, '') || ':' || price || ':' ||
-                COALESCE(point_director, '') || ':' || COALESCE(area_director, '') || ':' ||
-                COALESCE(internal_notes, '') || ':' || COALESCE(contract_number, '') || ':' ||
-                COALESCE(contract_end_date, '') || ':' || COALESCE(contract_file_name, '')
+                COALESCE(payment_status, '') || ':' || COALESCE(contract_number, '') || ':' ||
+                COALESCE(contract_file_name, '') || ':' || prev_hvs || ':' || prev_gvs || ':' || prev_elec
             ), '') FROM spaces"""
         ).fetchone()
         msgs_sig = conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM messages"
         ).fetchone()
-        return (tickets_sig[0], tickets_sig[1], spaces_sig[0], msgs_sig[0], msgs_sig[1])
+        fin_sig = conn.execute(
+            """SELECT
+                (SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status), '') FROM meter_readings),
+                (SELECT COUNT(*) FROM financial_docs),
+                (SELECT COALESCE(GROUP_CONCAT(id || ':' || is_paid || ':' || was_overdue), '') FROM rent_payments),
+                (SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status || ':' || receipt_file_name), '') FROM payment_requests)
+            """
+        ).fetchone()
+        return (
+            tickets_sig[0],
+            tickets_sig[1],
+            spaces_sig[0],
+            msgs_sig[0],
+            msgs_sig[1],
+            fin_sig[0],
+            fin_sig[1],
+            fin_sig[2],
+            fin_sig[3],
+        )
