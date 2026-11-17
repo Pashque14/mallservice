@@ -45,6 +45,47 @@ DOC_TYPES = {
     "payment_order": "Платежное поручение",
 }
 
+PASS_TYPE_META = {
+    "cargo_in": {"label": "Ввоз товара", "icon": "move_to_inbox", "badge": "indigo"},
+    "cargo_out": {"label": "Вывоз товара", "icon": "outbox", "badge": "purple"},
+    "night_work": {"label": "Ночные / монтажные работы", "icon": "nightlight", "badge": "deep-orange"},
+}
+
+PASS_STATUS_META = {
+    "pending": {"label": "На согласовании", "badge": "orange"},
+    "approved": {"label": "Одобрено (Пропуск выдан)", "badge": "green"},
+    "rejected": {"label": "Отклонено", "badge": "red"},
+}
+
+INSPECTION_CAT_META = {
+    "fire_safety": {"label": "Пожарная безопасность", "icon": "local_fire_department", "badge": "red"},
+    "sanitary": {"label": "СЭС / чистота", "icon": "cleaning_services", "badge": "teal"},
+    "hvac_tech": {"label": "Вентиляция / инженерия", "icon": "hvac", "badge": "blue"},
+}
+
+INSPECTION_STATUS_META = {
+    "open": {"label": "Выписано предписание", "badge": "orange"},
+    "review": {"label": "Отчет на проверке", "badge": "blue"},
+    "resolved": {"label": "Устранено", "badge": "green"},
+}
+
+PROMO_TYPE_META = {
+    "signage": {"label": "Вывеска / оформление витрины", "icon": "storefront", "badge": "indigo"},
+    "promo_zone": {"label": "Промо-стойка в галерее", "icon": "assistant_direction", "badge": "purple"},
+    "sale_event": {"label": "Акция / распродажа", "icon": "local_offer", "badge": "amber"},
+}
+
+MARKETING_STATUS_META = {
+    "pending": {"label": "На согласовании", "badge": "orange"},
+    "approved": {"label": "Согласовано", "badge": "green"},
+    "revision": {"label": "Требуются правки", "badge": "red"},
+}
+
+TURNOVER_STATUS_META = {
+    "submitted": {"label": "На проверке", "badge": "orange"},
+    "accepted": {"label": "Принято УК", "badge": "green"},
+}
+
 
 def logout():
     app.storage.user.clear()

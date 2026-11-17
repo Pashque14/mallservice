@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>MallService — Подробная карта архитектуры и процессов</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose',
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        curve: 'basis',
+        nodeSpacing: 32,
+        rankSpacing: 45
+      },
+      mindmap: {
+        useMaxWidth: true
+      },
+      er: {
+        useMaxWidth: true,
+        fontSize: 13
+      },
+      sequence: {
+        useMaxWidth: true
+      }
+    });
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      padding: 20px 28px;
+    }
+    .header {
+      max-width: 1440px;
+      margin: 0 auto 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid #334155;
+    }
+    h1 { margin: 0 0 4px; font-size: 24px; color: #ffffff; }
+    .subtitle { color: #94a3b8; font-size: 14px; margin: 0; }
+    .nav-bar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .nav-btn {
+      background: #1e293b;
+      color: #e2e8f0;
+      border: 1px solid #475569;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.15s;
+    }
+    .nav-btn:hover {
+      background: #2563eb;
+      border-color: #3b82f6;
+      color: #ffffff;
+    }
+    .card {
+      max-width: 1440px;
+      margin: 0 auto 24px;
+      background: #ffffff;
+      color: #0f172a;
+      border-radius: 12px;
+      padding: 20px 24px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+    }
+    .card-header h2 {
+      margin: 0;
+      font-size: 19px;
+      color: #0f172a;
+    }
+    .zoom-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .zoom-btn {
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      color: #1e293b;
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .zoom-btn:hover {
+      background: #e2e8f0;
+    }
+    .diagram-viewport {
+      width: 100%;
+      overflow-x: auto;
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 16px;
+      text-align: center;
+    }
+    .mermaid-wrap {
+      transform-origin: top center;
+      transition: transform 0.15s ease;
+      width: 100%;
+    }
+    .mermaid svg {
+      width: 100% !important;
+      max-width: 100% !important;
+      height: auto !important;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+      gap: 16px;
+    }
+    .sub-box {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .sub-box h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      color: #1e293b;
+      border-bottom: 1px solid #e2e8f0;
+      padding-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>MallService — Карта архитектуры и процессов</h1>
+      <p class="subtitle">Адаптировано под ширину экрана • Без синтаксических конфликтов</p>
+    </div>
+    <div class="nav-bar">
+      <a class="nav-btn" href="#sec-mindmap">1. Майндмэп функций</a>
+      <a class="nav-btn" href="#sec-arch">2. Архитектура модулей</a>
+      <a class="nav-btn" href="#sec-db">3. Схема базы данных</a>
+      <a class="nav-btn" href="#sec-flows">4. Жизненные циклы</a>
+      <a class="nav-btn" href="#sec-sync">5. Live-синхронизация</a>
+    </div>
+  </div>
+
+  <!-- РАЗДЕЛ 1: МАЙНДМЭП (БЕЗ ЗАПРЕЩЕННЫХ СИМВОЛОВ В МЕТКАХ) -->
+  <div class="card" id="sec-mindmap">
+    <div class="card-header">
+      <h2>1. Детальный майндмэп функциональности по ролям</h2>
+      <div class="zoom-controls">
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-1', -0.15)">− Уменьшить</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-1', 0, true)">По ширине экрана</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-1', 0.15)">+ Увеличить</button>
+      </div>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid-wrap" id="wrap-1">
+        <div class="mermaid">
+mindmap
+  root((MallService<br/>Управление ТЦ))
+    Арендодатель и УК
+      SVG-карта площадей
+        Переключение 1 и 2 этажа
+        Цвета: Свободно, Бронь, Занято
+        Знак ! справа: активная или аварийная заявка
+        Знак ₽ слева: просрочка оплаты аренды
+      Карточка павильона
+        Статус, бренд арендатора, ставка ₽/мес
+        Переключение оплаты текущего месяца
+        Контакты директора точки и куратора
+        Внутренние заметки УК
+        Договор аренды: скан или типовой шаблон
+      Финансы и счетчики
+        Формы на оплату: сумма, дедлайн, файл акта
+        Проверка платежек арендаторов и закрытие
+        Помесячная история и фиксация просрочек
+        Прием показаний ХВС, ГВС, Свет
+      Заявки и рассылки
+        Очередь заявок на ремонт и предпросмотр фото
+        Личные сообщения и рассылка на весь ТЦ
+    Арендатор
+      Мой павильон
+        Мини-карта этажа с подсветкой точки
+        Скачивание действующего договора
+        История платежей и просрочек
+      Оплата и счетчики
+        Скачивание акта от УК
+        Платежка: черновик и кнопка отправки в УК
+        Подача показаний ХВС, ГВС, Свет + расчет
+      Поддержка и связь
+        Заявка на ремонт: категория, срочность, фото
+        Контакты директора ТЦ и диспетчерской
+        Чат с УК и входящие объявления
+    Ядро системы
+      Авторизация и роли
+        Хранение сессии в app.storage.user
+        Хэши паролей SHA-256 и credentials.txt
+      Модули и база
+        6 отдельных Python-модулей + SQLite
+        Live-обновление экранов каждые 2 сек
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- РАЗДЕЛ 2: АРХИТЕКТУРА МОДУЛЕЙ -->
+  <div class="card" id="sec-arch">
+    <div class="card-header">
+      <h2>2. Модульная архитектура файлов и импортов</h2>
+      <div class="zoom-controls">
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-2', -0.15)">− Уменьшить</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-2', 0, true)">По ширине экрана</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-2', 0.15)">+ Увеличить</button>
+      </div>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid-wrap" id="wrap-2">
+        <div class="mermaid">
+flowchart LR
+    MAIN["<b>main.py</b><br/>Точка входа (порт 8080)<br/>db.init_db() + роуты"]
+
+    subgraph Pages["Страницы интерфейса"]
+        LOGIN["<b>login_page.py</b><br/>Роут: /login<br/>Вход по логину и паролю"]
+        LAND["<b>landlord_page.py</b><br/>Роут: /<br/>Кабинет арендодателя"]
+        TENANT["<b>tenant_page.py</b><br/>Роут: /tenant<br/>Кабинет арендатора"]
+    end
+
+    COMMON["<b>ui_common.py</b><br/>Шапка, статусы, загрузка файлов,<br/>диалоги договора, истории и фото"]
+
+    subgraph Storage["Слой данных"]
+        DB["<b>database.py</b><br/>CRUD, просрочки, тарифы,<br/>get_sync_signature()"]
+        FILES[("<b>mall.db</b> + <b>uploads/</b><br/>+ credentials.txt")]
+    end
+
+    MAIN --> LOGIN & LAND & TENANT
+    LOGIN & LAND & TENANT --> COMMON
+    LOGIN & LAND & TENANT & COMMON --> DB
+    DB <--> FILES
+
+    style MAIN fill:#dbeafe,stroke:#2563eb,stroke-width:2px
+    style DB fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+    style COMMON fill:#fef3c7,stroke:#d97706,stroke-width:2px
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- РАЗДЕЛ 3: СХЕМА БАЗЫ ДАННЫХ -->
+  <div class="card" id="sec-db">
+    <div class="card-header">
+      <h2>3. Схема таблиц базы данных (mall.db — ER-диаграмма)</h2>
+      <div class="zoom-controls">
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-3', -0.15)">− Уменьшить</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-3', 0, true)">По ширине экрана</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-3', 0.15)">+ Увеличить</button>
+      </div>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid-wrap" id="wrap-3">
+        <div class="mermaid">
+erDiagram
+    SPACES ||--o{ PAYMENT_REQUESTS : "формы оплаты"
+    SPACES ||--o{ RENT_PAYMENTS : "история оплат"
+    SPACES ||--o{ TICKETS : "заявки"
+    SPACES ||--o{ METER_READINGS : "счетчики"
+    SPACES ||--o{ MESSAGES : "сообщения"
+    SPACES ||--o| USERS : "аккаунт"
+
+    SPACES {
+        text id PK
+        int floor
+        text code
+        text tenant
+        real area
+        int price
+        text status
+        text payment_status
+        text contract_number
+        real prev_hvs
+        real prev_gvs
+        real prev_elec
+    }
+
+    PAYMENT_REQUESTS {
+        int id PK
+        text space_id FK
+        text period
+        int amount
+        text due_date
+        text bill_file_path
+        text receipt_file_path
+        text status
+        int was_overdue
+    }
+
+    RENT_PAYMENTS {
+        int id PK
+        text space_id FK
+        text period
+        int amount
+        int is_paid
+        int was_overdue
+        text paid_date
+    }
+
+    TICKETS {
+        int id PK
+        text space_id FK
+        text category
+        text priority
+        text description
+        text photo_path
+        text status
+    }
+
+    METER_READINGS {
+        int id PK
+        text space_id FK
+        text period
+        real curr_hvs
+        real curr_gvs
+        real curr_elec
+        int total_cost
+        text status
+    }
+
+    MESSAGES {
+        int id PK
+        text sender_role
+        text space_id FK
+        text body
+        text attachment_path
+    }
+
+    USERS {
+        text username PK
+        text password_hash
+        text role
+        text space_id FK
+    }
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- РАЗДЕЛ 4: ЖИЗНЕННЫЕ ЦИКЛЫ (РАЗБИТО НА ДВЕ УДОБНЫЕ КОЛОНКИ ПОД ШИРИНУ МОНИТОРА) -->
+  <div class="card" id="sec-flows">
+    <div class="card-header">
+      <h2>4. Жизненные циклы документов, заявок и счетчиков</h2>
+      <div class="zoom-controls">
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-4', -0.15)">− Уменьшить</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-4', 0, true)">По ширине экрана</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-4', 0.15)">+ Увеличить</button>
+      </div>
+    </div>
+    <div class="mermaid-wrap" id="wrap-4">
+      <div class="grid-2">
+        <div class="sub-box">
+          <h3>А. Документооборот по оплате (payment_requests)</h3>
+          <div class="mermaid">
+flowchart TD
+    A1["1. УК выставляет акт/счет:<br/>Сумма + Срок оплаты + Файл"] --> A2["2. Форма открыта: <b>awaiting_payment</b><br/>Месяц павильона -> Не оплачено"]
+    A2 --> A3{"Прошла дата<br/>due_date?"}
+    A3 -->|Да| A4["Авто-бейдж <b>ПРОСРОЧЕНО</b><br/>Значок (₽) на карте ТЦ"]
+    A3 -->|Нет| A5["Ожидание в срок"]
+    A4 & A5 --> A6["3. Арендатор выбирает файл платежки<br/>(локальный черновик)"]
+    A6 --> A7["4. Нажимает <b>Отправить платежку в УК</b><br/>Статус: <b>under_review</b>"]
+    A7 --> A8{"5. Проверка УК"}
+    A8 -->|Ошибка| A9["Возврат на доработку<br/>(awaiting_payment)"]
+    A9 --> A6
+    A8 -->|Верно| A10["Закрытие формы: <b>closed</b><br/>Запись в rent_payments + автопросрочка"]
+
+    style A10 fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+    style A4 fill:#fee2e2,stroke:#dc2626,stroke-width:2px
+          </div>
+        </div>
+
+        <div class="sub-box">
+          <h3>Б. Заявки на ремонт и показания счетчиков</h3>
+          <div class="mermaid">
+flowchart TD
+    subgraph TFlow["Заявки на ремонт (tickets)"]
+        B1["1. Арендатор: категория + срочность + фото"] --> B2["2. Статус: <b>new</b> (бейдж ! на карте)"]
+        B2 --> B3["3. УК берет в работу: <b>in_progress</b>"]
+        B3 --> B4["4. Выполнено: <b>done</b> (бейдж ! снят)"]
+    end
+
+    subgraph MFlow["Показания счетчиков (meter_readings)"]
+        C1["1. Арендатор: ввод ХВС, ГВС, Свет<br/>Авторасчет: ΔХВС×48 + ΔГВС×195 + ΔСвет×6.5"] --> C2["2. Передано в УК: <b>submitted</b>"]
+        C2 --> C3["3. УК принимает: <b>accepted</b><br/>Обновление prev_hvs / prev_gvs / prev_elec"]
+    end
+
+    style B4 fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+    style C3 fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- РАЗДЕЛ 5: LIVE-СИНХРОНИЗАЦИЯ -->
+  <div class="card" id="sec-sync">
+    <div class="card-header">
+      <h2>5. Механизм Live-синхронизации между окнами (без перезагрузки)</h2>
+      <div class="zoom-controls">
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-5', -0.15)">− Уменьшить</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-5', 0, true)">По ширине экрана</button>
+        <button class="zoom-btn" onclick="zoomDiagram('wrap-5', 0.15)">+ Увеличить</button>
+      </div>
+    </div>
+    <div class="diagram-viewport">
+      <div class="mermaid-wrap" id="wrap-5">
+        <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant T as Кабинет Арендатора (/tenant)
+    participant DB as SQLite (mall.db)
+    participant L as Кабинет Арендодателя (/)
+
+    T->>T: Выбирает файл платежки (черновик в памяти)
+    T->>DB: Нажимает «Отправить платежку в УК» -> attach_payment_receipt()
+    DB-->>T: Статус формы: under_review
+
+    loop Каждые 2.0 сек (ui.timer)
+        L->>DB: db.get_sync_signature()
+        DB-->>L: Кортеж из 9 агрегатов таблиц
+    end
+
+    L->>L: current_sig != last_sig -> ui.notify() + обновление UI и SVG-карты
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const scales = {};
+    function zoomDiagram(id, delta, reset = false) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (reset) {
+        scales[id] = 1.0;
+      } else {
+        scales[id] = Math.max(0.6, Math.min(2.0, (scales[id] || 1.0) + delta));
+      }
+      el.style.transform = `scale(${scales[id]})`;
+    }
+  </script>
+</body>
+</html>

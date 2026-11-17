@@ -12,6 +12,8 @@ from ui_common import (
     render_header,
     save_uploaded_file,
 )
+from passes_section import render_tenant_passes_and_inspections
+from marketing_section import render_tenant_marketing, render_tenant_turnover_card
 
 
 def register_tenant_page():
@@ -95,6 +97,13 @@ def register_tenant_page():
                 with ui.row().classes("w-full justify-between items-center bg-slate-100 p-3 rounded-lg mt-2 flex-wrap gap-2"):
                     ui.label(f"Этаж: {space['floor']} • {space['area']} м²").classes("font-medium")
                     ui.label(f"Ставка: {space['price']:,} ₽/мес".replace(",", " ")).classes("font-semibold text-blue-700")
+                    dep_req = space.get("deposit_required") or 0
+                    dep_paid = space.get("deposit_paid") or 0
+                    if dep_req > 0:
+                        ui.label(f"Депозит: {dep_paid:,} / {dep_req:,} ₽".replace(",", " ")).classes("text-xs text-slate-600 font-medium")
+                    to_pct = space.get("turnover_percent") or 0.0
+                    if to_pct > 0:
+                        ui.badge(f"% с оборота: {to_pct}%", color="indigo").props("outline")
                     with ui.row().classes("items-center gap-1.5"):
                         ui.label(f"Оплата ({db.current_month_str()}):").classes("text-xs text-slate-500")
                         ui.badge("Оплачено" if is_paid_now else "Не оплачено", color="green" if is_paid_now else "orange")
@@ -132,14 +141,22 @@ def register_tenant_page():
                             else:
                                 card_cls = "border-slate-200 bg-slate-50"
 
+                            days_ov, pen_val = 0, 0
+                            if is_late_open:
+                                days_ov, pen_val = db.calculate_overdue_penalty(
+                                    pr["amount"], pr["due_date"], space.get("penalty_rate") or 0.1
+                                )
+
                             with ui.column().classes(f"w-full p-3.5 border rounded-lg gap-2 {card_cls}"):
                                 with ui.row().classes("w-full justify-between items-start gap-2"):
                                     with ui.row().classes("items-center gap-1.5 flex-wrap"):
                                         ui.badge(f"Форма №{pr['id']}", color="grey-8")
                                         ui.label(f"Период {pr['period']}").classes("font-bold text-slate-800")
-                                    with ui.row().classes("items-center gap-1 shrink-0"):
+                                    with ui.row().classes("items-center gap-1 shrink-0 flex-wrap"):
                                         if is_late_open:
                                             ui.badge("ПРОСРОЧЕНО", color="red")
+                                            if days_ov > 0:
+                                                ui.badge(f"Просрочка {days_ov} дн. • Пени: {pen_val:,} ₽".replace(",", " "), color="negative")
                                         elif is_late_closed:
                                             ui.badge("Оплачено с просрочкой", color="orange")
                                         ui.badge(st_meta["label"], color=st_meta["badge"])
@@ -305,6 +322,11 @@ def register_tenant_page():
                                     ui.label(f"ХВС: {r['curr_hvs']} | ГВС: {r['curr_gvs']} | Свет: {r['curr_elec']} • {r['created_at']}").classes("text-xs text-slate-400")
                                 ui.badge("Принято УК" if is_acc else "На проверке", color="green" if is_acc else "orange")
 
+            # Блок товарооборота и процента с выручки (если предусмотрен договором)
+            render_tenant_turnover_card(
+                my_space_id, state, lambda: (space_info_card.refresh(), tenant_finance_panel.refresh())
+            )
+
         @ui.refreshable
         def my_tickets_card():
             my_tickets = db.get_tickets(space_id=my_space_id)
@@ -373,6 +395,23 @@ def register_tenant_page():
                                 on_click=lambda p=m["attachment_path"], n=m["attachment_name"]: ui.download(p, n),
                             ).props("dense flat size=sm color=primary")
 
+        @ui.refreshable
+        def passes_panel():
+            render_tenant_passes_and_inspections(my_space_id, state, lambda: refresh_all())
+
+        @ui.refreshable
+        def marketing_panel():
+            render_tenant_marketing(my_space_id, state, lambda: refresh_all())
+
+        def refresh_all():
+            space_info_card.refresh()
+            if not state["pending_receipts"]:
+                tenant_finance_panel.refresh()
+            my_tickets_card.refresh()
+            tenant_messages_feed.refresh()
+            passes_panel.refresh()
+            marketing_panel.refresh()
+
         def poll_tenant_updates():
             current_sig = db.get_sync_signature()
             if current_sig != state["last_sig"]:
@@ -382,13 +421,17 @@ def register_tenant_page():
                     ui.notify("Новое сообщение или рассылка от администрации ТЦ!", type="info", icon="mail")
                 if current_sig[8] != state["last_sig"][8]:
                     ui.notify("Обновлена форма на оплату от управляющей компании!", type="info", icon="receipt_long")
+                if len(current_sig) > 9 and len(state["last_sig"]) > 9:
+                    if current_sig[9] != state["last_sig"][9]:
+                        ui.notify("Статус заявки на электронный пропуск обновлен!", type="info", icon="badge")
+                    if current_sig[10] != state["last_sig"][10]:
+                        ui.notify("Обновлены предписания по проверкам (ПБ / СЭС)!", type="warning", icon="policy")
+                    if current_sig[11] != state["last_sig"][11]:
+                        ui.notify("Статус вашей заявки на акцию/вывеску обновлен!", type="info", icon="campaign")
+                    if current_sig[12] != state["last_sig"][12]:
+                        ui.notify("Обновлен отчет по товарообороту!", type="info", icon="point_of_sale")
                 state["last_sig"] = current_sig
-                space_info_card.refresh()
-                my_tickets_card.refresh()
-                tenant_messages_feed.refresh()
-                # Не сбрасываем панель финансов, если пользователь сейчас держит неприкрепленный черновик
-                if not state["pending_receipts"]:
-                    tenant_finance_panel.refresh()
+                refresh_all()
 
         ui.timer(2.0, poll_tenant_updates)
 
@@ -453,7 +496,7 @@ def register_tenant_page():
                             state["ticket_photo"] = None
                             ticket_uploader.reset()
                             state["last_sig"] = db.get_sync_signature()
-                            my_tickets_card.refresh()
+                            refresh_all()
                             ui.notify("Заявка отправлена арендодателю!", type="positive")
 
                         ui.button("Отправить заявку", icon="send", on_click=submit_ticket).classes("w-full mt-1")
@@ -483,6 +526,8 @@ def register_tenant_page():
             with ui.card().classes("w-full p-5"):
                 with ui.tabs().classes("w-full text-slate-700") as t_tabs:
                     t_tab_fin = ui.tab("Формы на оплату и счетчики", icon="payments")
+                    t_tab_passes = ui.tab("Пропуска и предписания", icon="verified_user")
+                    t_tab_marketing = ui.tab("Маркетинг и акции", icon="campaign")
                     t_tab_tickets = ui.tab("Мои заявки на ремонт", icon="build")
                     t_tab_msgs = ui.tab("Связь с арендодателем и рассылки", icon="mail")
 
@@ -490,7 +535,14 @@ def register_tenant_page():
                     with ui.tab_panel(t_tab_fin).classes("p-0"):
                         tenant_finance_panel()
 
+                    with ui.tab_panel(t_tab_passes).classes("p-0"):
+                        passes_panel()
+
+                    with ui.tab_panel(t_tab_marketing).classes("p-0"):
+                        marketing_panel()
+
                     with ui.tab_panel(t_tab_tickets).classes("p-0"):
+                        my_tickets_card()
                         my_tickets_card()
 
                     with ui.tab_panel(t_tab_msgs).classes("p-0"):

@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import os
 import sqlite3
@@ -113,10 +114,31 @@ def init_db():
             "prev_hvs": "REAL DEFAULT 0",
             "prev_gvs": "REAL DEFAULT 0",
             "prev_elec": "REAL DEFAULT 0",
+            "deposit_required": "INTEGER DEFAULT 0",
+            "deposit_paid": "INTEGER DEFAULT 0",
+            "penalty_rate": "REAL DEFAULT 0.1",
+            "turnover_percent": "REAL DEFAULT 0.0",
         }
         for col, col_type in migrations.items():
             if col not in space_cols:
                 conn.execute(f"ALTER TABLE spaces ADD COLUMN {col} {col_type}")
+
+        # Обновим дефолты для депозитов и % товарооборота для существующих павильонов
+        conn.execute("""
+            UPDATE spaces
+            SET deposit_required = price, deposit_paid = price, penalty_rate = 0.1
+            WHERE (deposit_required IS NULL OR deposit_required = 0) AND price > 0 AND status = 'occupied'
+        """)
+        conn.execute("""
+            UPDATE spaces
+            SET turnover_percent = 3.0
+            WHERE code = '1-01' AND (turnover_percent IS NULL OR turnover_percent = 0.0)
+        """)
+        conn.execute("""
+            UPDATE spaces
+            SET turnover_percent = 5.0
+            WHERE code = '2-01' AND (turnover_percent IS NULL OR turnover_percent = 0.0)
+        """)
 
         if "prev_water" in space_cols:
             conn.execute("UPDATE spaces SET prev_hvs = prev_water WHERE prev_hvs = 0 AND prev_water > 0")
@@ -275,6 +297,181 @@ def init_db():
             )
         """)
 
+        # БЛОК 1: Электронные пропуска
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS access_passes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                pass_type TEXT NOT NULL,
+                work_date TEXT NOT NULL,
+                time_window TEXT NOT NULL,
+                vehicle_info TEXT DEFAULT '',
+                workers_list TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                uk_comment TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        # БЛОК 1: Журнал плановых проверок и предписаний (ПБ, СЭС, Охрана труда)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS inspections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                deadline TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                uk_photo_path TEXT DEFAULT '',
+                uk_photo_name TEXT DEFAULT '',
+                tenant_report TEXT DEFAULT '',
+                tenant_photo_path TEXT DEFAULT '',
+                tenant_photo_name TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        # БЛОК 3: Маркетинг и согласование акций/вывесок
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS marketing_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                promo_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                date_range TEXT NOT NULL,
+                description TEXT NOT NULL,
+                mockup_file_name TEXT DEFAULT '',
+                mockup_file_path TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                uk_feedback TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        # БЛОК 3: Товарооборот арендаторов (% от выручки)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_turnovers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                space_id TEXT NOT NULL,
+                space_code TEXT NOT NULL,
+                tenant_name TEXT NOT NULL,
+                period TEXT NOT NULL,
+                reported_revenue INTEGER NOT NULL,
+                calculated_fee INTEGER NOT NULL,
+                report_file_name TEXT DEFAULT '',
+                report_file_path TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'submitted',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        # Демо-записи для пропусков
+        if conn.execute("SELECT COUNT(*) FROM access_passes").fetchone()[0] == 0:
+            demo_passes = [
+                (
+                    "1_top_1", "1-01", "Кофейня «Бодрость»", "cargo_in",
+                    (datetime.now()).strftime("%d.%m.%Y"), "22:00 - 00:00",
+                    "Газель Next В 123 АР 196", "Водитель: Сидоров А., экспедитор: Мельников К.",
+                    "Доставка партии кофемашин, сиропов и зерен", "approved",
+                    "Пропуск одобрен службой безопасности. Разгрузка через Дебаркадер №2.",
+                    "16.11.2026 14:20"
+                ),
+                (
+                    "2_top_1", "2-01", "Одежда «Стиль»", "night_work",
+                    "25.11.2026", "23:00 - 05:00",
+                    "Лада Ларгус М 777 ТТ 196", "Бригада монтажников: Кузнецов И., Лебедев С.",
+                    "Монтаж новых рейлов и светодиодной подсветки витрины", "pending",
+                    "",
+                    "17.11.2026 11:45"
+                ),
+            ]
+            conn.executemany(
+                """INSERT INTO access_passes
+                   (space_id, space_code, tenant_name, pass_type, work_date, time_window,
+                    vehicle_info, workers_list, description, status, uk_comment, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                demo_passes,
+            )
+
+        # Демо-записи для предписаний
+        if conn.execute("SELECT COUNT(*) FROM inspections").fetchone()[0] == 0:
+            demo_inspections = [
+                (
+                    "1_top_1", "1-01", "Кофейня «Бодрость»", "fire_safety",
+                    "Освободить проход к эвакуационному выходу от коробок с одноразовой посудой",
+                    "28.11.2026", "open", "", "", "", "", "", "16.11.2026 10:15"
+                ),
+                (
+                    "2_top_1", "2-01", "Одежда «Стиль»", "sanitary",
+                    "Устранить скопление упаковочного полиэтилена в зоне примерочных кабинок",
+                    "15.11.2026", "open", "", "", "", "", "", "12.11.2026 15:30"
+                ),
+            ]
+            conn.executemany(
+                """INSERT INTO inspections
+                   (space_id, space_code, tenant_name, category, title, deadline, status,
+                    uk_photo_path, uk_photo_name, tenant_report, tenant_photo_path, tenant_photo_name, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                demo_inspections,
+            )
+
+        # Демо-записи для маркетинга
+        if conn.execute("SELECT COUNT(*) FROM marketing_requests").fetchone()[0] == 0:
+            demo_marketing = [
+                (
+                    "1_top_1", "1-01", "Кофейня «Бодрость»", "promo_zone",
+                    "Промо-стойка с дегустацией сезонного раф-кофе",
+                    "25.11.2026 - 27.11.2026",
+                    "Установка компактной брендированной промо-стойки 1.5х1.5м у центрального входа в атриум",
+                    "", "", "approved",
+                    "Согласовано отделом маркетинга. Подключение к сети у колонны №4.",
+                    "15.11.2026 12:00"
+                ),
+                (
+                    "2_top_1", "2-01", "Одежда «Стиль»", "sale_event",
+                    "Распродажа Black Friday — скидки до 50%",
+                    "27.11.2026 - 30.11.2026",
+                    "Размещение плакатов формата А1 на внутренних стеклах витрины павильона",
+                    "", "", "pending",
+                    "",
+                    "17.11.2026 10:30"
+                ),
+            ]
+            conn.executemany(
+                """INSERT INTO marketing_requests
+                   (space_id, space_code, tenant_name, promo_type, title, date_range, description,
+                    mockup_file_name, mockup_file_path, status, uk_feedback, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                demo_marketing,
+            )
+
+        # Демо-записи для товарооборота
+        if conn.execute("SELECT COUNT(*) FROM tenant_turnovers").fetchone()[0] == 0:
+            demo_turnovers = [
+                (
+                    "1_top_1", "1-01", "Кофейня «Бодрость»", "10.2026",
+                    1850000, 55500, "Z_отчет_Октябрь_2026.pdf", "", "accepted", "03.11.2026 14:10"
+                ),
+                (
+                    "2_top_1", "2-01", "Одежда «Стиль»", "10.2026",
+                    2400000, 120000, "Справка_ОФД_Октябрь_2026.pdf", "", "submitted", "04.11.2026 16:45"
+                ),
+            ]
+            conn.executemany(
+                """INSERT INTO tenant_turnovers
+                   (space_id, space_code, tenant_name, period, reported_revenue, calculated_fee,
+                    report_file_name, report_file_path, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                demo_turnovers,
+            )
+
         if conn.execute("SELECT COUNT(*) FROM spaces").fetchone()[0] == 0:
             initial_spaces = []
             sample_data = {
@@ -431,12 +628,17 @@ def update_space(
     area_director: str,
     internal_notes: str,
     payment_status: str = "paid",
+    deposit_required: int = 0,
+    deposit_paid: int = 0,
+    penalty_rate: float = 0.1,
+    turnover_percent: float = 0.0,
 ):
     with get_connection() as conn:
         conn.execute(
             """UPDATE spaces
                SET status = ?, tenant = ?, price = ?, point_director = ?, area_director = ?,
-                   internal_notes = ?, payment_status = ?
+                   internal_notes = ?, payment_status = ?, deposit_required = ?, deposit_paid = ?,
+                   penalty_rate = ?, turnover_percent = ?
                WHERE id = ?""",
             (
                 status,
@@ -446,6 +648,10 @@ def update_space(
                 area_director.strip(),
                 internal_notes.strip(),
                 payment_status,
+                deposit_required,
+                deposit_paid,
+                penalty_rate,
+                turnover_percent,
                 space_id,
             ),
         )
@@ -934,6 +1140,402 @@ def get_messages_for_tenant(space_id: str) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+# --- РАСЧЕТ ПЕНЕЙ И ПРОСРОЧЕК ---
+
+def calculate_overdue_penalty(amount: int, due_date_str: str, rate_percent: float = 0.1) -> tuple[int, int]:
+    """Возвращает (кол-во дней просрочки, сумма пени в рублях)"""
+    if not due_date_str or not due_date_str.strip() or amount <= 0:
+        return 0, 0
+    try:
+        due_dt = datetime.strptime(due_date_str.strip(), "%d.%m.%Y").date()
+        today = datetime.now().date()
+        delta_days = (today - due_dt).days
+        if delta_days <= 0:
+            return 0, 0
+        rate = max(0.0, float(rate_percent or 0.1))
+        penalty = int(round(amount * (rate / 100.0) * delta_days))
+        return delta_days, penalty
+    except ValueError:
+        return 0, 0
+
+
+# --- БЛОК 1: ЭЛЕКТРОННЫЕ ПРОПУСКА НА ВВОЗ/ВЫВОЗ И НОЧНЫЕ РАБОТЫ ---
+
+def create_access_pass(
+    space_id: str,
+    pass_type: str,
+    work_date: str,
+    time_window: str,
+    vehicle_info: str,
+    workers_list: str,
+    description: str,
+):
+    space = get_space_by_id(space_id)
+    if not space:
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO access_passes
+               (space_id, space_code, tenant_name, pass_type, work_date, time_window,
+                vehicle_info, workers_list, description, status, uk_comment, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                pass_type,
+                work_date.strip(),
+                time_window.strip(),
+                vehicle_info.strip(),
+                workers_list.strip(),
+                description.strip(),
+                now,
+            ),
+        )
+
+
+def get_access_passes(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                """SELECT * FROM access_passes
+                   WHERE space_id = ?
+                   ORDER BY CASE status WHEN 'pending' THEN 1 WHEN 'approved' THEN 2 ELSE 3 END, id DESC""",
+                (space_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM access_passes
+                   ORDER BY CASE status WHEN 'pending' THEN 1 WHEN 'approved' THEN 2 ELSE 3 END, id DESC"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def update_access_pass_status(pass_id: int, status: str, uk_comment: str = ""):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE access_passes SET status = ?, uk_comment = ? WHERE id = ?",
+            (status, uk_comment.strip(), pass_id),
+        )
+
+
+# --- БЛОК 1: ЖУРНАЛ ПРОВЕРОК И ПРЕДПИСАНИЙ (ПБ, СЭС, ОХРАНА ТРУДА) ---
+
+def create_inspection(
+    space_id: str,
+    category: str,
+    title: str,
+    deadline: str,
+    uk_photo_name: str = "",
+    uk_photo_path: str = "",
+):
+    space = get_space_by_id(space_id)
+    if not space or not title.strip():
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO inspections
+               (space_id, space_code, tenant_name, category, title, deadline, status,
+                uk_photo_path, uk_photo_name, tenant_report, tenant_photo_path, tenant_photo_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, '', '', '', ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                category,
+                title.strip(),
+                deadline.strip(),
+                uk_photo_path,
+                uk_photo_name,
+                now,
+            ),
+        )
+
+
+def get_inspections(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                """SELECT * FROM inspections
+                   WHERE space_id = ?
+                   ORDER BY CASE status WHEN 'open' THEN 1 WHEN 'review' THEN 2 ELSE 3 END, id DESC""",
+                (space_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM inspections
+                   ORDER BY CASE status WHEN 'review' THEN 1 WHEN 'open' THEN 2 ELSE 3 END, id DESC"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def submit_inspection_report(
+    inspection_id: int,
+    report: str,
+    photo_name: str = "",
+    photo_path: str = "",
+):
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE inspections
+               SET tenant_report = ?, tenant_photo_name = ?, tenant_photo_path = ?, status = 'review'
+               WHERE id = ?""",
+            (report.strip(), photo_name, photo_path, inspection_id),
+        )
+
+
+def resolve_inspection(inspection_id: int):
+    with get_connection() as conn:
+        conn.execute("UPDATE inspections SET status = 'resolved' WHERE id = ?", (inspection_id,))
+
+
+# --- БЛОК 3: МАРКЕТИНГ И СОГЛАСОВАНИЕ АКЦИЙ / ВЫВЕСОК ---
+
+def create_marketing_request(
+    space_id: str,
+    promo_type: str,
+    title: str,
+    date_range: str,
+    description: str,
+    mockup_file_name: str = "",
+    mockup_file_path: str = "",
+):
+    space = get_space_by_id(space_id)
+    if not space or not title.strip():
+        return
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO marketing_requests
+               (space_id, space_code, tenant_name, promo_type, title, date_range, description,
+                mockup_file_name, mockup_file_path, status, uk_feedback, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                promo_type,
+                title.strip(),
+                date_range.strip(),
+                description.strip(),
+                mockup_file_name,
+                mockup_file_path,
+                now,
+            ),
+        )
+
+
+def get_marketing_requests(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                """SELECT * FROM marketing_requests
+                   WHERE space_id = ?
+                   ORDER BY CASE status WHEN 'pending' THEN 1 WHEN 'revision' THEN 2 ELSE 3 END, id DESC""",
+                (space_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM marketing_requests
+                   ORDER BY CASE status WHEN 'pending' THEN 1 WHEN 'revision' THEN 2 ELSE 3 END, id DESC"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def update_marketing_status(request_id: int, status: str, uk_feedback: str = ""):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE marketing_requests SET status = ?, uk_feedback = ? WHERE id = ?",
+            (status, uk_feedback.strip(), request_id),
+        )
+
+
+# --- БЛОК 3: ТОВАРООБОРОТ АРЕНДАТОРОВ (% ОТ ВЫРУЧКИ) ---
+
+def submit_turnover_report(
+    space_id: str,
+    period: str,
+    reported_revenue: int,
+    report_file_name: str = "",
+    report_file_path: str = "",
+):
+    space = get_space_by_id(space_id)
+    if not space:
+        return
+    t_percent = float(space.get("turnover_percent") or 0.0)
+    calculated_fee = int(round(reported_revenue * (t_percent / 100.0)))
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO tenant_turnovers
+               (space_id, space_code, tenant_name, period, reported_revenue, calculated_fee,
+                report_file_name, report_file_path, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
+            (
+                space_id,
+                space["code"],
+                space["tenant"] or "Без названия",
+                period.strip() or current_month_str(),
+                int(reported_revenue),
+                calculated_fee,
+                report_file_name,
+                report_file_path,
+                now,
+            ),
+        )
+
+
+def get_turnovers(space_id: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        if space_id:
+            rows = conn.execute(
+                "SELECT * FROM tenant_turnovers WHERE space_id = ? ORDER BY id DESC",
+                (space_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM tenant_turnovers
+                   ORDER BY CASE status WHEN 'submitted' THEN 1 ELSE 2 END, id DESC"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_latest_turnover(space_id: str, period: str) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """SELECT * FROM tenant_turnovers
+               WHERE space_id = ? AND period = ?
+               ORDER BY CASE status WHEN 'accepted' THEN 1 ELSE 2 END, id DESC LIMIT 1""",
+            (space_id, period.strip()),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_turnover_status(turnover_id: int, status: str):
+    with get_connection() as conn:
+        conn.execute("UPDATE tenant_turnovers SET status = ? WHERE id = ?", (status, turnover_id))
+
+
+# --- АВТОРАСЧЕТ СЧЕТА-АКТА (СТАВКА + СЧЕТЧИКИ + % С ОБОРОТА) ---
+
+def get_billing_calculation(space_id: str, period: str) -> dict:
+    space = get_space_by_id(space_id)
+    if not space:
+        return {"total": 0, "title": "", "desc": "", "base": 0, "meter": 0, "turnover": 0}
+    base_price = space["price"]
+
+    with get_connection() as conn:
+        row_mr = conn.execute(
+            """SELECT total_cost, status FROM meter_readings
+               WHERE space_id = ? AND period = ?
+               ORDER BY CASE status WHEN 'accepted' THEN 1 ELSE 2 END, id DESC LIMIT 1""",
+            (space_id, period),
+        ).fetchone()
+        meter_cost = row_mr["total_cost"] if row_mr else 0
+
+        row_to = conn.execute(
+            """SELECT calculated_fee, status FROM tenant_turnovers
+               WHERE space_id = ? AND period = ?
+               ORDER BY CASE status WHEN 'accepted' THEN 1 ELSE 2 END, id DESC LIMIT 1""",
+            (space_id, period),
+        ).fetchone()
+        turnover_fee = row_to["calculated_fee"] if row_to else 0
+
+    total = base_price + meter_cost + turnover_fee
+    parts = [f"аренда {base_price:,} ₽".replace(",", " ")]
+    if meter_cost:
+        parts.append(f"коммунальные услуги {meter_cost:,} ₽".replace(",", " "))
+    if turnover_fee:
+        parts.append(f"% с оборота {turnover_fee:,} ₽".replace(",", " "))
+
+    title = f"Акт за {period}: " + " + ".join(parts)
+    desc = " + ".join(parts)
+    return {
+        "total": total,
+        "title": title,
+        "desc": desc,
+        "base": base_price,
+        "meter": meter_cost,
+        "turnover": turnover_fee,
+    }
+
+
+# --- ВЫГРУЗКА РЕЕСТРОВ В CSV (EXCEL-СОВМЕСТИМЫЙ UTF-8-SIG) ---
+
+def export_financial_summary_csv() -> tuple[str, str]:
+    exports_dir = os.path.join(UPLOAD_DIR, "exports")
+    os.makedirs(exports_dir, exist_ok=True)
+    fname = f"Ведомость_оплат_и_долгов_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    fpath = os.path.join(exports_dir, fname)
+
+    spaces = get_all_spaces()
+    pay_requests = get_payment_requests()
+
+    with open(fpath, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow([
+            "Павильон", "Арендатор", "Этаж", "Площадь (м²)", "Базовая ставка (₽/мес)",
+            "Статус текущего месяца", "Депозит по договору (₽)", "Депозит внесен (₽)",
+            "% от оборота", "Открытые счета (₽)", "Просроченные счета (₽)", "Начисленные пени (₽)",
+            "Директор точки"
+        ])
+        for s in spaces:
+            if s["status"] == "free":
+                continue
+            sp_reqs = [r for r in pay_requests if r["space_id"] == s["id"] and r["status"] != "closed"]
+            open_sum = sum(r["amount"] for r in sp_reqs)
+            overdue_sum = 0
+            penalty_sum = 0
+            p_rate = float(s.get("penalty_rate") or 0.1)
+            for r in sp_reqs:
+                if is_due_date_passed(r["due_date"]):
+                    overdue_sum += r["amount"]
+                    _, p_val = calculate_overdue_penalty(r["amount"], r["due_date"], p_rate)
+                    penalty_sum += p_val
+
+            pay_st = "Оплачено" if s.get("payment_status") == "paid" else "Не оплачено"
+            contact = s.get("point_director") or ""
+            writer.writerow([
+                s["code"], s["tenant"] or "Без названия", s["floor"], s["area"], s["price"],
+                pay_st, s.get("deposit_required") or 0, s.get("deposit_paid") or 0,
+                f"{s.get('turnover_percent') or 0.0}%", open_sum, overdue_sum, penalty_sum, contact
+            ])
+    return fpath, fname
+
+
+def export_meter_readings_csv() -> tuple[str, str]:
+    exports_dir = os.path.join(UPLOAD_DIR, "exports")
+    os.makedirs(exports_dir, exist_ok=True)
+    fname = f"Реестр_показаний_счетчиков_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    fpath = os.path.join(exports_dir, fname)
+
+    readings = get_meter_readings()
+    with open(fpath, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow([
+            "ID", "Павильон", "Арендатор", "Период",
+            "ХВС нач (м³)", "ХВС тек (м³)", "ХВС расход (м³)",
+            "ГВС нач (м³)", "ГВС тек (м³)", "ГВС расход (м³)",
+            "Э/Э нач (кВт·ч)", "Э/Э тек (кВт·ч)", "Э/Э расход (кВт·ч)",
+            "Начислено (₽)", "Статус", "Дата передачи"
+        ])
+        for r in readings:
+            diff_h = round(r["curr_hvs"] - r["prev_hvs"], 2)
+            diff_g = round(r["curr_gvs"] - r["prev_gvs"], 2)
+            diff_e = round(r["curr_elec"] - r["prev_elec"], 2)
+            st_text = "Принято УК" if r["status"] == "accepted" else "На проверке"
+            writer.writerow([
+                r["id"], r["space_code"], r["tenant_name"], r["period"],
+                r["prev_hvs"], r["curr_hvs"], diff_h,
+                r["prev_gvs"], r["curr_gvs"], diff_g,
+                r["prev_elec"], r["curr_elec"], diff_e,
+                r["total_cost"], st_text, r["created_at"]
+            ])
+    return fpath, fname
+
+
 def get_sync_signature() -> tuple:
     with get_connection() as conn:
         tickets_sig = conn.execute(
@@ -943,7 +1545,9 @@ def get_sync_signature() -> tuple:
             """SELECT COALESCE(GROUP_CONCAT(
                 id || ':' || status || ':' || COALESCE(tenant, '') || ':' || price || ':' ||
                 COALESCE(payment_status, '') || ':' || COALESCE(contract_number, '') || ':' ||
-                COALESCE(contract_file_name, '') || ':' || prev_hvs || ':' || prev_gvs || ':' || prev_elec
+                COALESCE(contract_file_name, '') || ':' || prev_hvs || ':' || prev_gvs || ':' || prev_elec || ':' ||
+                COALESCE(deposit_required, 0) || ':' || COALESCE(deposit_paid, 0) || ':' ||
+                COALESCE(penalty_rate, 0) || ':' || COALESCE(turnover_percent, 0)
             ), '') FROM spaces"""
         ).fetchone()
         msgs_sig = conn.execute(
@@ -957,6 +1561,19 @@ def get_sync_signature() -> tuple:
                 (SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status || ':' || receipt_file_name), '') FROM payment_requests)
             """
         ).fetchone()
+        passes_sig = conn.execute(
+            "SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status || ':' || COALESCE(uk_comment, '')), '') FROM access_passes"
+        ).fetchone()[0]
+        inspections_sig = conn.execute(
+            "SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status || ':' || COALESCE(tenant_report, '')), '') FROM inspections"
+        ).fetchone()[0]
+        marketing_sig = conn.execute(
+            "SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status || ':' || COALESCE(uk_feedback, '')), '') FROM marketing_requests"
+        ).fetchone()[0]
+        turnovers_sig = conn.execute(
+            "SELECT COUNT(*) || ':' || COALESCE(GROUP_CONCAT(id || ':' || status), '') FROM tenant_turnovers"
+        ).fetchone()[0]
+
         return (
             tickets_sig[0],
             tickets_sig[1],
@@ -967,4 +1584,8 @@ def get_sync_signature() -> tuple:
             fin_sig[1],
             fin_sig[2],
             fin_sig[3],
+            passes_sig,
+            inspections_sig,
+            marketing_sig,
+            turnovers_sig,
         )

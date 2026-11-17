@@ -2,6 +2,8 @@ import os
 from datetime import datetime, timedelta
 from nicegui import app, events, ui
 import database as db
+from marketing_section import render_landlord_marketing_and_turnovers
+from passes_section import render_landlord_passes_and_inspections
 from ui_common import (
     PAYMENT_META,
     PAY_REQ_META,
@@ -125,6 +127,8 @@ def register_landlord_page():
             tickets_panel.refresh()
             messages_feed.refresh()
             finance_panel.refresh()
+            passes_panel.refresh()
+            marketing_panel.refresh()
             if update_inspector:
                 inspector_panel.refresh()
 
@@ -139,6 +143,15 @@ def register_landlord_page():
                     ui.notify("Поступили новые показания счетчиков!", type="info", icon="speed")
                 if current_sig[8] != state["last_sig"][8]:
                     ui.notify("Арендатор отправил платежку по форме оплаты!", type="positive", icon="receipt_long")
+                if len(current_sig) > 9 and len(state["last_sig"]) > 9:
+                    if current_sig[9] != state["last_sig"][9]:
+                        ui.notify("Новая заявка на электронный пропуск!", type="info", icon="verified_user")
+                    if current_sig[10] != state["last_sig"][10]:
+                        ui.notify("Арендатор прислал отчет по предписанию!", type="info", icon="fact_check")
+                    if current_sig[11] != state["last_sig"][11]:
+                        ui.notify("Новая заявка на согласование вывески / акции!", type="info", icon="campaign")
+                    if current_sig[12] != state["last_sig"][12]:
+                        ui.notify("Поступил отчет по товарообороту (% с выручки)!", type="info", icon="point_of_sale")
                 refresh_all(update_inspector=False)
 
         ui.timer(2.0, poll_updates)
@@ -261,6 +274,33 @@ def register_landlord_page():
                                 label=f"Оплата ({db.current_month_str()})",
                             ).classes("w-40")
 
+                        ui.label("Обеспечительный депозит и пени").classes("text-xs font-bold uppercase tracking-wider text-slate-500 mt-3")
+                        with ui.row().classes("w-full gap-2 no-wrap"):
+                            deposit_req_inp = ui.number(
+                                label="Депозит план (₽)",
+                                value=space.get("deposit_required") if space.get("deposit_required") is not None else space["price"],
+                                step=5000,
+                            ).classes("flex-1")
+                            deposit_paid_inp = ui.number(
+                                label="Депозит внесен (₽)",
+                                value=space.get("deposit_paid") if space.get("deposit_paid") is not None else space["price"],
+                                step=5000,
+                            ).classes("flex-1")
+
+                        with ui.row().classes("w-full gap-2 no-wrap"):
+                            penalty_rate_inp = ui.number(
+                                label="Пени (%/день)",
+                                value=space.get("penalty_rate") if space.get("penalty_rate") is not None else 0.1,
+                                step=0.05,
+                                format="%.2f",
+                            ).classes("w-32")
+                            turnover_percent_inp = ui.number(
+                                label="% с оборота (0=фикс)",
+                                value=space.get("turnover_percent") if space.get("turnover_percent") is not None else 0.0,
+                                step=0.5,
+                                format="%.1f",
+                            ).classes("flex-1")
+
                         ui.label("Контакты руководства точки").classes("text-xs font-bold uppercase tracking-wider text-slate-500 mt-3")
 
                         point_dir_input = ui.input(
@@ -293,6 +333,10 @@ def register_landlord_page():
                                 area_director=area_dir_input.value,
                                 internal_notes=notes_input.value,
                                 payment_status=pay_select.value,
+                                deposit_required=int(deposit_req_inp.value or 0),
+                                deposit_paid=int(deposit_paid_inp.value or 0),
+                                penalty_rate=float(penalty_rate_inp.value or 0.1),
+                                turnover_percent=float(turnover_percent_inp.value or 0.0),
                             )
                             ui.notify(f"Павильон {space['code']} обновлен", type="positive")
                             refresh_all(update_inspector=True)
@@ -301,10 +345,12 @@ def register_landlord_page():
 
                 inspector_panel()
 
-            # Нижний блок: 3 вкладки
+            # Нижний блок: 5 вкладок
             with ui.card().classes("w-full p-5"):
                 with ui.tabs().classes("w-full text-slate-700") as tabs:
-                    tab_fin = ui.tab("Оплата, формы счетов и счетчики", icon="payments")
+                    tab_fin = ui.tab("Оплата, счета и счетчики", icon="payments")
+                    tab_passes = ui.tab("Пропуска и проверки", icon="verified_user")
+                    tab_marketing = ui.tab("Маркетинг и обороты", icon="campaign")
                     tab_tickets = ui.tab("Заявки на ремонт", icon="build")
                     tab_msgs = ui.tab("Сообщения и рассылки", icon="mail")
 
@@ -319,6 +365,26 @@ def register_landlord_page():
 
                             review_cnt = sum(1 for pr in pay_requests if pr["status"] == "under_review")
                             overdue_cnt = sum(1 for pr in pay_requests if pr["status"] != "closed" and db.is_due_date_passed(pr["due_date"]))
+
+                            # Панель экспорта отчетов в CSV / Excel
+                            with ui.row().classes("w-full justify-between items-center mb-3 pb-3 border-b flex-wrap gap-2"):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.icon("table_view", size="sm").classes("text-slate-600")
+                                    ui.label("Финансовые взаиморасчеты, счета-акты и приборы учета").classes("text-base font-bold text-slate-800")
+
+                                with ui.row().classes("items-center gap-2"):
+                                    def on_export_fin():
+                                        fpath, fname = db.export_financial_summary_csv()
+                                        ui.download(fpath, fname)
+                                        ui.notify(f"Ведомость «{fname}» выгружена", type="positive")
+
+                                    def on_export_meters():
+                                        fpath, fname = db.export_meter_readings_csv()
+                                        ui.download(fpath, fname)
+                                        ui.notify(f"Реестр «{fname}» выгружен", type="positive")
+
+                                    ui.button("Ведомость оплат и долгов (CSV)", icon="file_download", on_click=on_export_fin).props("dense outline size=sm color=primary")
+                                    ui.button("Реестр счетчиков (CSV)", icon="file_download", on_click=on_export_meters).props("dense outline size=sm color=secondary")
 
                             with ui.row().classes("w-full gap-6 items-start no-wrap"):
                                 # ЛЕВАЯ КОЛОНКА: Создание формы на оплату + Лента форм
@@ -348,6 +414,21 @@ def register_landlord_page():
                                             req_amount_inp.value = sp["price"]
 
                                     req_space_sel.on_value_change(on_req_space_change)
+
+                                    def auto_calc_bill():
+                                        if not req_space_sel.value:
+                                            ui.notify("Сначала выберите павильон арендатора", type="warning")
+                                            return
+                                        calc = db.get_billing_calculation(req_space_sel.value, req_period_inp.value or db.current_month_str())
+                                        req_amount_inp.value = calc["total"]
+                                        req_title_inp.value = calc["title"]
+                                        ui.notify(f"Сумма рассчитана: {calc['total']:,} ₽ ({calc['desc']})".replace(",", " "), type="info")
+
+                                    ui.button(
+                                        "Подтянуть сумму (Ставка + Счетчики за период)",
+                                        icon="calculate",
+                                        on_click=auto_calc_bill,
+                                    ).props("dense outline size=sm color=primary").classes("w-full")
 
                                     req_title_inp = ui.input(
                                         label="Назначение платежа / название акта",
@@ -423,9 +504,14 @@ def register_landlord_page():
                                                             ui.label(pr["tenant_name"]).classes("font-semibold text-slate-800")
                                                             ui.label(f"• Период {pr['period']}").classes("text-xs text-slate-500")
 
-                                                        with ui.row().classes("items-center gap-1 shrink-0"):
+                                                        with ui.row().classes("items-center gap-1 shrink-0 flex-wrap"):
                                                             if is_late_open:
+                                                                sp_item = db.get_space_by_id(pr["space_id"]) or {}
+                                                                p_rate = float(sp_item.get("penalty_rate") or 0.1)
+                                                                days_ov, penalty_val = db.calculate_overdue_penalty(pr["amount"], pr["due_date"], p_rate)
                                                                 ui.badge("ПРОСРОЧЕНО", color="red")
+                                                                if days_ov > 0:
+                                                                    ui.badge(f"Просрочка {days_ov} дн. • Пени: {penalty_val:,} ₽".replace(",", " "), color="red").props("outline")
                                                             elif is_late_closed:
                                                                 ui.badge("Закрыто с просрочкой", color="orange")
                                                             ui.badge(st_meta["label"], color=st_meta["badge"])
@@ -549,7 +635,23 @@ def register_landlord_page():
 
                         finance_panel()
 
-                    # --- ВКЛАДКА 2: ЗАЯВКИ НА РЕМОНТ ---
+                    # --- ВКЛАДКА 2: ПРОПУСКА И ПРОВЕРКИ ---
+                    with ui.tab_panel(tab_passes).classes("p-0"):
+                        @ui.refreshable
+                        def passes_panel():
+                            render_landlord_passes_and_inspections(state, lambda: refresh_all(update_inspector=False))
+
+                        passes_panel()
+
+                    # --- ВКЛАДКА 3: МАРКЕТИНГ И ТОВАРООБОРОТ ---
+                    with ui.tab_panel(tab_marketing).classes("p-0"):
+                        @ui.refreshable
+                        def marketing_panel():
+                            render_landlord_marketing_and_turnovers(state, lambda: refresh_all(update_inspector=False))
+
+                        marketing_panel()
+
+                    # --- ВКЛАДКА 4: ЗАЯВКИ НА РЕМОНТ ---
                     with ui.tab_panel(tab_tickets).classes("p-0"):
                         @ui.refreshable
                         def tickets_panel():
